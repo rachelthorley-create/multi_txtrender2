@@ -121,7 +121,7 @@ function drawLabelToCanvas(labelObj, params){
     if(ln.bold) fontStr+='bold ';
     fontStr += `${ln.size}px ${ln.font||'Arial'}`;
     ctx.font = fontStr;
-    const maxWidth = Wpx-marginSidePx*2;
+    const maxWidth = mmToPx(85);
     const measured = ctx.measureText(ln.text).width;
     const scaleX = Math.min(1,maxWidth/measured);
     if(scaleX<1){
