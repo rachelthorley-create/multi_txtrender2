@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Label Render</title>
+
+  <!-- JSZip library -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.0/jszip.min.js"></script>
+
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;margin:5px;display:flex;flex-direction:column;align-items:center}
+  #uploadLabel{margin-bottom:15px}
+  .button-row{display:flex;gap:10px;margin-top:8px;flex-wrap:wrap}
+  #allPreviews{display:flex;flex-direction:column;gap:38px;margin-top:10px}
+  canvas{width:378px;height:283px;border:1px solid #ccc;border-radius:6px}
+</style>
+</head>
+<body>
+  <h2>Label Renderer v1.7</h2>
+  <p>Upload a JSON file exported from the generator to render PNG previews and download SVGs for all labels.</p>
+  
+  <input type="file" id="uploadLabel" accept=".json">
+  <div class="button-row">
+    <button id="previewBtn">Preview Labels</button>
+    <button id="downloadBtn">Download All SVGs</button>
+  </div>
+  <div id="allPreviews"></div>
+
+<script>
+const uploadLabel = document.getElementById('uploadLabel');
+const previewBtn = document.getElementById('previewBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const allPreviews = document.getElementById('allPreviews');
+
+let labelData = null;
+const mmToPx = mm=>Math.round(mm*3.78);
+
+function readFile(file){
+  const reader = new FileReader();
+  reader.onload = e => {
+    try{
+      labelData = JSON.parse(e.target.result);
+      //alert("JSON loaded. Click 'Preview Labels' to render.");
+    }catch(err){
+      alert("Invalid JSON file.");
+    }
+  };
+  reader.readAsText(file);
+}
+
+uploadLabel.addEventListener('change', e=>{
+  if(e.target.files.length>0) readFile(e.target.files[0]);
+});
+
+/* Draw a single label to canvas */
+function drawLabelToCanvas(labelObj, params){
+  const Wpx = mmToPx(params.canvas.width_mm);
+  const Hpx = mmToPx(params.canvas.height_mm);
+  const radius = mmToPx(params.canvas.corner_radius_mm);
+  const circleRPx = mmToPx(params.canvas.circle_diameter_mm/2);
+  const circleTopPx = mmToPx(params.canvas.circle_top_mm);
+  const marginSidePx = mmToPx(params.canvas.margin_side_mm);
+  const topExtraPx = mmToPx(params.canvas.top_margin_extra_mm);
+
+  const textShiftPx = mmToPx(params.global.text_shift_mm || 0);
+  const gap12Px = mmToPx(params.global.gap12_mm || 0);
+  const gap23Px = mmToPx(params.global.linkGaps ? params.global.gap12_mm : params.global.gap23_mm || 0);
+
+  const c = document.createElement('canvas');
+  c.width = Wpx; c.height = Hpx;
+  const ctx = c.getContext('2d');
+
+  // Background
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.moveTo(radius,0); ctx.lineTo(Wpx-radius,0);
+  ctx.quadraticCurveTo(Wpx,0,Wpx,radius);
+  ctx.lineTo(Wpx,Hpx-radius);
+  ctx.quadraticCurveTo(Wpx,Hpx,Wpx-radius,Hpx);
+  ctx.lineTo(radius,Hpx);
+  ctx.quadraticCurveTo(0,Hpx,0,Hpx-radius);
+  ctx.lineTo(0,radius);
+  ctx.quadraticCurveTo(0,0,radius,0);
+  ctx.closePath();
+  ctx.fill();
+
+  // Circle
+  ctx.beginPath();
+  ctx.arc(Wpx/2, circleTopPx + circleRPx, circleRPx, 0, Math.PI*2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+
+  // Prepare lines
+  const lines = [];
+  lines.push({...labelObj.lines.line1});
+  if(labelObj.lines.line2.text || labelObj.lines.line3.text) lines.push({...labelObj.lines.line2});
+  if(labelObj.lines.line3.text) lines.push({...labelObj.lines.line3});
+
+  // Compute total height
+  let totalH = 0;
+  lines.forEach((ln,i)=>{
+    totalH += ln.size;
+    if(i===0 && lines.length>1) totalH += gap12Px;
+    if(i===1 && lines.length>2) totalH += gap23Px;
+  });
+
+  const topTextY = circleTopPx + circleRPx + topExtraPx + textShiftPx;
+  const bottomY = Hpx - marginSidePx;
+  const avail = bottomY - topTextY;
+  let startY = topTextY + (avail-totalH)*0.55 + (lines.length>0?lines[0].size*0.75:0);
+  // vertical start position
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+
+  lines.forEach((ln,i)=>{
+    let fontStr='';
+    if(ln.italic) fontStr+='italic ';
+    if(ln.bold) fontStr+='bold ';
+    fontStr += `${ln.size}px ${ln.font||'Arial'}`;
+    ctx.font = fontStr;
+    const maxWidth = Wpx-marginSidePx*2;
+    const measured = ctx.measureText(ln.text).width;
+    const scaleX = Math.min(1,maxWidth/measured);
+    if(scaleX<1){
+      ctx.save();
+      ctx.translate(Wpx/2,startY);
+      ctx.scale(scaleX,1);
+      ctx.fillText(ln.text,0,0);
+      ctx.restore();
+    }else ctx.fillText(ln.text,Wpx/2,startY);
+    if(i===0 && lines.length>1) startY += gap12Px+(lines[1]?lines[1].size:0);
+    else if(i===1 && lines.length>2) startY += gap23Px+(lines[2]?lines[2].size:0);
+  });
+
+  return c;
+}
+
+/* Draw single label as SVG */
+function createLabelSVG(labelObj, params){
+  const W = params.canvas.width_mm * 3.78;
+  const H = params.canvas.height_mm * 3.78;
+  const radius = params.canvas.corner_radius_mm * 3.78;
+  const circleRPx = params.canvas.circle_diameter_mm / 2 * 3.78;
+  const circleTopPx = params.canvas.circle_top_mm * 3.78;
+  const marginSidePx = params.canvas.margin_side_mm * 3.78;
+  const topExtraPx = params.canvas.top_margin_extra_mm * 3.78;
+  const textShiftPx = (params.global.text_shift_mm || 0) * 3.78;
+  const gap12Px = (params.global.gap12_mm || 0) * 3.78;
+  const gap23Px = ((params.global.linkGaps ? params.global.gap12_mm : params.global.gap23_mm || 0) * 3.78);
+
+  // prepare lines
+  const lines = [];
+  lines.push({...labelObj.lines.line1});
+  if(labelObj.lines.line2.text || labelObj.lines.line3.text) lines.push({...labelObj.lines.line2});
+  if(labelObj.lines.line3.text) lines.push({...labelObj.lines.line3});
+
+  // compute total height
+  let totalH = 0;
+  lines.forEach((ln,i)=>{
+    totalH += ln.size;
+    if(i===0 && lines.length>1) totalH += gap12Px;
+    if(i===1 && lines.length>2) totalH += gap23Px;
+  });
+
+  const topTextY = circleTopPx + circleRPx + topExtraPx + textShiftPx;
+  const bottomY = H - marginSidePx;
+  const avail = bottomY - topTextY;
+  let startY = topTextY + (avail - totalH) * 0.55 + (lines.length > 0 ? lines[0].size * 0.75 : 0);
+
+  // start SVG
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">`;
+  svg += `<rect x="0" y="0" width="${W}" height="${H}" rx="${radius}" ry="${radius}" fill="white" stroke="red" stroke-width="1"/>`;
+  svg += `<circle cx="${W/2}" cy="${circleTopPx + circleRPx}" r="${circleRPx}" fill="none" stroke="red" stroke-width="1"/>`;
+
+  lines.forEach((ln,i)=>{
+    // horizontal scaling based on text length
+    const maxWidth = W - marginSidePx*2;
+    const approxWidth = ln.text.length * ln.size * 0.6; // approximate width per character
+    const scaleX = Math.min(1, maxWidth / approxWidth);
+
+    // SVG text with horizontal scaling using <g> transform
+    svg += `<g transform="translate(${W/2},${startY}) scale(${scaleX},1)">
+              <text x="0" y="0" font-family="${ln.font||'Arial'}" font-size="${ln.size}" fill="blue" font-weight="${ln.bold?'bold':'normal'}" font-style="${ln.italic?'italic':'normal'}" text-anchor="middle" dominant-baseline="alphabetic">${ln.text}</text>
+            </g>`;
+
+    if(i===0 && lines.length>1) startY += gap12Px + (lines[1]?lines[1].size:0);
+    else if(i===1 && lines.length>2) startY += gap23Px + (lines[2]?lines[2].size:0);
+  });
+
+  svg += `</svg>`;
+  return svg;
+}
+
+
+/* Preview Labels */
+function previewLabels(){
+  if(!labelData) return alert("Upload JSON first");
+  allPreviews.innerHTML = '';
+  labelData.labels.forEach(lbl=>{
+    const header = document.createElement('div');
+    header.style.fontWeight = 'bold';
+    header.style.marginTop = '10px';
+    header.textContent = `${lbl.name} - ${lbl.qty} copies`;
+    allPreviews.appendChild(header);
+
+    const c = drawLabelToCanvas(lbl,labelData);
+    allPreviews.appendChild(c);
+  });
+}
+  
+/* Download all SVGs as separate files */
+function downloadSVGs(){
+  if(!labelData) return alert("Upload JSON first");
+  const zip = new JSZip();
+
+  labelData.labels.forEach(lbl=>{
+    const svg = createLabelSVG(lbl,labelData);
+    zip.file(`${lbl.name}_${lbl.qty}copies.svg`, svg);
+  });
+
+  zip.generateAsync({type:"blob"}).then(function(content){
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(content);
+    a.download = "labels.zip";
+    a.click();
+  });
+}
+  
+previewBtn.addEventListener('click',previewLabels);
+downloadBtn.addEventListener('click',downloadSVGs);
+</script>
+</body>
+</html>
